@@ -96,10 +96,67 @@ ok(abs($ms * 1_000_000 - $ns) < 1_000_000, 'millis ~= nanos / 1e6');
         'millis(1) list reconciles with millis()');
 }
 
-# any true value triggers the array form
+# any true value triggers the array form; false values return scalars
 {
     my @list = nanos("true");
     is(scalar @list, 2, 'nanos(true) returns a 2-element list');
+
+    local *Time::Nanos::hrtime = sub { 1_000_000_001 };
+    my $ns_scalar = nanos(0);
+    is($ns_scalar, 1_000_000_001, 'nanos(0) returns a scalar');
+
+    my @micro_list = micros(undef);
+    is(scalar @micro_list, 1, 'micros(undef) returns a scalar');
+
+    my @millis_list = millis("");
+    is(scalar @millis_list, 1, 'millis("") returns a scalar');
+}
+
+# wrapped functions pass the configured clock to hrtime()
+{
+    local $Time::Nanos::CLOCK = 0;
+    local *Time::Nanos::hrtime = sub {
+        is($_[0], 0, 'realtime wrapper passes clock 0');
+        return 1_000_000_000;
+    };
+    nanos();
+
+    local $Time::Nanos::CLOCK = 1;
+    local *Time::Nanos::hrtime = sub {
+        is($_[0], 1, 'monotonic wrapper passes clock 1');
+        return 1_000_000_000;
+    };
+    micros();
+    millis();
+}
+
+# deterministic boundary checks via a mocked hrtime().
+{
+    my @boundary_cases = (
+        [0,             0, 0, 0, 'zero'],
+        [999,           0, 999, 0, 'below one microsecond'],
+        [999_999,       0, 999_999, 999, 'below one millisecond'],
+        [999_999_999,   0, 999_999_999, 999, 'below one second'],
+        [1_000_000_000, 1, 0, 0, 'exactly one second'],
+    );
+
+    for my $case (@boundary_cases) {
+        my ($mock_ns, $sec, $fraction, $unit_fraction, $label) = @$case;
+
+        local *Time::Nanos::hrtime = sub { $mock_ns };
+
+        my ($ns_sec, $ns_fraction) = nanos(1);
+        is($ns_sec, $sec, "nanos boundary $label: seconds");
+        is($ns_fraction, $fraction, "nanos boundary $label: nanoseconds");
+
+        my ($us_sec, $us_fraction) = micros(1);
+        is($us_sec, $sec, "micros boundary $label: seconds");
+        is($us_fraction, int($fraction / 1000), "micros boundary $label: microseconds");
+
+        my ($ms_sec, $ms_fraction) = millis(1);
+        is($ms_sec, $sec, "millis boundary $label: seconds");
+        is($ms_fraction, int($fraction / 1_000_000), "millis boundary $label: milliseconds");
+    }
 }
 
 # deterministic check via a mocked hrtime().
@@ -146,6 +203,13 @@ ok(abs($ms * 1_000_000 - $ns) < 1_000_000, 'millis ~= nanos / 1e6');
     is($Time::Nanos::CLOCK, 0, 'clock_source(0) sets $CLOCK = 0');
 }
 
+# missing clock source argument croaks
+{
+    eval { Time::Nanos::clock_source() };
+    ok($@, 'clock_source() without an argument croaks');
+    like($@, qr/requires an argument/, 'missing argument error is descriptive');
+}
+
 # invalid clock source string croaks
 {
     eval { Time::Nanos::clock_source('invalid') };
@@ -158,6 +222,21 @@ ok(abs($ms * 1_000_000 - $ns) < 1_000_000, 'millis ~= nanos / 1e6');
     eval { Time::Nanos::hrtime(99) };
     ok($@, 'hrtime() with invalid clock source croaks');
     like($@, qr/invalid clock source/, 'error mentions invalid clock source');
+}
+
+# invalid $CLOCK is propagated through wrapper calls
+{
+    local $Time::Nanos::CLOCK = 99;
+
+    eval { nanos() };
+    ok($@, 'nanos() with invalid $CLOCK croaks');
+    like($@, qr/invalid clock source/, 'nanos() preserves hrtime() error');
+
+    eval { micros() };
+    ok($@, 'micros() with invalid $CLOCK croaks');
+
+    eval { millis() };
+    ok($@, 'millis() with invalid $CLOCK croaks');
 }
 
 done_testing();
